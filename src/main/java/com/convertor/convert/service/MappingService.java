@@ -1,6 +1,5 @@
 package com.convertor.convert.service;
 
-
 import com.convertor.convert.model.Field;
 import com.convertor.convert.model.FieldTemplate;
 import com.convertor.convert.model.Profile;
@@ -60,6 +59,8 @@ public class MappingService {
                 .createdAt(Instant.now())
                 .build();
 
+        // Lista para recolectar todos los Fields y guardarlos en lote al final
+        List<Field> allFieldsToSave = new ArrayList<>();
         List<Field> topFields = new ArrayList<>();
 
         Set<String> rootIds = profileTemplate.getRootFieldTemplateIds();
@@ -68,17 +69,21 @@ public class MappingService {
                 FieldTemplate ft = fieldTemplateRepository.findById(rootFieldTemplateId)
                         .orElseThrow(() -> new IllegalStateException("FieldTemplate raíz no existe: " + rootFieldTemplateId));
                 JsonNode valueNode = rootNode.get(ft.getName());
-                Field crafted = craftFieldFromTemplate(ft, valueNode, profile.getId());
+                // craftFieldFromTemplate ahora devuelve el Field, no lo guarda
+                Field crafted = craftFieldFromTemplate(ft, valueNode, profile.getId(), allFieldsToSave);
                 topFields.add(crafted);
             }
         }
 
         profile.setFields(topFields);
+        
+        // Guardar todos los Fields en lote para mejorar el rendimiento
+        fieldRepository.saveAll(allFieldsToSave);
 
         return profile;
     }
 
-    private Field craftFieldFromTemplate(FieldTemplate template, JsonNode valueNode, String profileId) throws Exception {
+    private Field craftFieldFromTemplate(FieldTemplate template, JsonNode valueNode, String profileId, List<Field> allFieldsToSave) throws Exception {
         Field field = Field.builder()
                 .id(UUID.randomUUID().toString())
                 .profileId(profileId)
@@ -146,8 +151,8 @@ public class MappingService {
                         }
 
                         JsonNode childValueNode = (valueNode != null) ? valueNode.get(attr) : null;
-                        Field childField = craftFieldFromTemplate(childTemplate, childValueNode, profileId);
-                        fieldRepository.save(childField);
+                        // Pasar allFieldsToSave a la llamada recursiva
+                        Field childField = craftFieldFromTemplate(childTemplate, childValueNode, profileId, allFieldsToSave);
                         objectValuesMap.put(attr, childField.getId());
                     }
                     field.setObjectValuesJson(objectMapper.writeValueAsString(objectValuesMap));
@@ -165,8 +170,8 @@ public class MappingService {
                         FieldTemplate childTemplate = fieldTemplateRepository.findById(childTemplateId)
                                 .orElseThrow(() -> new IllegalStateException("Child template no encontrado: " + childTemplateId));
                         JsonNode childValueNode = (valueNode != null && valueNode.isArray() && valueNode.size() > idx) ? valueNode.get(idx) : null;
-                        Field childField = craftFieldFromTemplate(childTemplate, childValueNode, profileId);
-                        fieldRepository.save(childField);
+                        // Pasar allFieldsToSave a la llamada recursiva
+                        Field childField = craftFieldFromTemplate(childTemplate, childValueNode, profileId, allFieldsToSave);
                         fixedMap.put(idx, childField.getId());
                         idx++;
                     }
@@ -184,15 +189,23 @@ public class MappingService {
                     if (valueNode != null && valueNode.isArray()) {
                         int counter = 0;
                         for (JsonNode itemValNode : valueNode) {
-                            JsonNode rawVal = itemValNode.get("value");
-                            if (rawVal != null && !rawVal.isNull()) {
-                                String normalized = normalizeValueText(rawVal.asText());
-                                if (itemValNode instanceof ObjectNode) {
-                                    ((ObjectNode) itemValNode).put("value", normalized);
+                            JsonNode itemNodeForProcessing = itemValNode; // Usar el nodo original por defecto
+                            
+                            // Evitar la modificación del ObjectNode original:
+                            // Si itemValNode es un objeto y tiene un campo "value" que necesita normalización,
+                            // creamos una copia para modificarla, dejando el original intacto.
+                            if (itemValNode instanceof ObjectNode && itemValNode.has("value")) {
+                                JsonNode rawVal = itemValNode.get("value");
+                                if (rawVal != null && !rawVal.isNull()) {
+                                    String normalized = normalizeValueText(rawVal.asText());
+                                    ObjectNode copiedNode = objectMapper.createObjectNode();
+                                    copiedNode.setAll((ObjectNode) itemValNode); // Copiar todos los campos del original
+                                    copiedNode.put("value", normalized); // Modificar solo el campo 'value' en la copia
+                                    itemNodeForProcessing = copiedNode;
                                 }
                             }
-                            Field itemField = craftFieldFromTemplate(itemTemplate, itemValNode, profileId);
-                            fieldRepository.save(itemField);
+                            // Pasar allFieldsToSave a la llamada recursiva
+                            Field itemField = craftFieldFromTemplate(itemTemplate, itemNodeForProcessing, profileId, allFieldsToSave);
                             itemIds.add(itemField.getId());
 
                             if (++counter % 1000 == 0) {
@@ -211,8 +224,10 @@ public class MappingService {
                 }
             }
         }
-
-        return fieldRepository.save(field);
+        
+        // Añadir el Field actual a la lista para guardado en lote
+        allFieldsToSave.add(field);
+        return field; // Retornar el Field para que se añada a la lista de topFields o a las relaciones
     }
 
     private void validatePrimitive(JsonNode ruleNode, FieldTemplate template, JsonNode valueNode) {
