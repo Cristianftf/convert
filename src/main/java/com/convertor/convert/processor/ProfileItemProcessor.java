@@ -1,34 +1,58 @@
 package com.convertor.convert.processor;
 
-import com.convertor.convert.model.Profile;
-import com.convertor.convert.service.MappingService;
-import lombok.RequiredArgsConstructor;
+import com.convertor.convert.dto.ProfileTemplateDTO;
+import com.convertor.convert.dto.FieldTemplateDTO;
+import com.convertor.convert.model.ConstructionRule;
+import com.convertor.convert.model.TypeField;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Component
-@StepScope // Importante: para poder inyectar JobParameters
-@RequiredArgsConstructor
-public class ProfileItemProcessor implements ItemProcessor<String, Profile> {
+@StepScope
+public class ProfileItemProcessor implements ItemProcessor<String, ProfileTemplateDTO> {
 
-    private final MappingService mappingService;
+    @Value("#{jobParameters['profileName']}")
+    private String profileName;
 
-    // Inyectamos el profileTemplateId desde los parámetros del Job
-    private final String profileTemplateId;
-
-    public ProfileItemProcessor(@Value("#{jobParameters['profileTemplateId']}") String profileTemplateId,
-                                MappingService mappingService) {
-        this.profileTemplateId = profileTemplateId;
-        this.mappingService = mappingService;
-    }
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
-    public Profile process(@NonNull String rawJson) throws Exception {
-        // Toda la lógica de transformación compleja ahora se delega al MappingService.
-        // El procesador actúa como un simple adaptador entre el mundo de Spring Batch y el servicio de negocio.
-        return mappingService.transformRawJsonToProfile(rawJson, this.profileTemplateId);
+    public ProfileTemplateDTO process(@NonNull String rawJson) throws Exception {
+        JsonNode root = objectMapper.readTree(rawJson);
+        JsonNode valuesNode = root.path("values");
+        
+        if (!valuesNode.isArray()) {
+            throw new IllegalArgumentException("El JSON no contiene un array 'values'");
+        }
+
+        // Crear FieldTemplateDTO con ConstructionRule
+        FieldTemplateDTO fieldTemplate = new FieldTemplateDTO();
+        fieldTemplate.setName(profileName + " Field");
+        
+        ConstructionRule constructionRule = new ConstructionRule();
+        constructionRule.setTypeField(TypeField.LIST);
+        
+        List<String> valueList = new ArrayList<>();
+        for (JsonNode valueNode : valuesNode) {
+            valueList.add(valueNode.path("value").asText());
+        }
+        constructionRule.setValues(valueList);
+        
+        fieldTemplate.setConstructionRule(constructionRule);
+
+        // Crear ProfileTemplateDTO
+        ProfileTemplateDTO profileTemplate = new ProfileTemplateDTO();
+        profileTemplate.setName(profileName);
+        profileTemplate.setFieldTemplate(fieldTemplate);
+
+        return profileTemplate;
     }
 }
